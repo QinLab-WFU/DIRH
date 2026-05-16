@@ -41,7 +41,23 @@ def build_trans(usage, resize_size=256, crop_size=224):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
+def build_loader(root, dataset, usage, transform, **kwargs):
+    ds_cls = kwargs.pop("ds_cls", MyDataset)
+    dset = ds_cls(root, dataset, usage, transform)
 
+    verbose = kwargs.pop("verbose", True)
+    if verbose:
+        print(f"{usage} set length: {len(dset)}")
+
+    shuffle = kwargs.pop("shuffle", usage == "train")
+    if shuffle:
+        loader = DataLoader(dset, shuffle=True, **kwargs)
+    else:
+        # generator=torch.Generator(): to keep torch.get_rng_state() unchanged!
+        # https://discuss.pytorch.org/t/does-a-dataloader-change-random-state-even-when-shuffle-argument-is-false/92569/4
+        loader = DataLoader(dset, generator=torch.Generator(), **kwargs)
+
+    return loader
 
 def build_loaders(name, root, **kwargs):
     train_trans = build_trans("train")

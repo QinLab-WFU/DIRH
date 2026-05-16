@@ -64,12 +64,15 @@ def build_default_model(backbone, n_bits, pretrained, need_pos=False):
         raise NotImplementedError(f"not support backbone: {backbone}")
 
     # leave for application to init
-    if pretrained:
-        last_layer = get_attr(net, last_layer_pos)
+    # if pretrained:
+    # last_layer = get_attr(net, last_layer_pos)
 
-        # use the following method for initialization
-        nn.init.xavier_uniform_(last_layer.weight)
-        nn.init.constant_(last_layer.bias, 0)
+    # ASL
+    # nn.init.kaiming_normal_(last_layer.weight, mode="fan_out")
+
+    # 20240930: use the following method for initialization
+    # nn.init.xavier_uniform_(last_layer.weight)
+    # nn.init.constant_(last_layer.bias, 0)
 
     return (net, last_layer_pos) if need_pos else net
 
@@ -103,16 +106,16 @@ class ResNet50(nn.Module):
         self.backbone = torchvision.models.resnet50(weights=weights)
         self.dim_feature = self.backbone.fc.in_features
 
+        # self.backbone.fc = nn.Linear(self.dim_feature, n_bits, bias=False)
         self.backbone.fc = nn.Linear(self.dim_feature, n_bits)
 
-        if pretrained:
-            # use the following method for initialization
-            nn.init.xavier_uniform_(self.backbone.fc.weight)
-            nn.init.zeros_(self.backbone.fc.bias)
+        #
+        nn.init.xavier_uniform_(self.backbone.fc.weight)
+        nn.init.zeros_(self.backbone.fc.bias)
 
-            # IDML
-            # nn.init.kaiming_normal_(self.backbone.fc.weight, mode="fan_out")
-            # nn.init.constant_(self.backbone.fc.bias, 0)
+        # IDML
+        # nn.init.kaiming_normal_(self.backbone.fc.weight, mode="fan_out")
+        # nn.init.constant_(self.backbone.fc.bias, 0)
 
         if self.double:
             self.backbone.maxpool2 = nn.AdaptiveMaxPool2d((1, 1))

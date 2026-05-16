@@ -1,0 +1,22 @@
+{
+    "backbone": "resnet50_frozen_normalize",
+    "batch_size": 128,
+    "data_dir": "../_datasets",
+    "dataset": "flickr",
+    "device": "cuda:0",
+    "lambda1": 1,
+    "lambda2": 0.8,
+    "lr": 1e-05,
+    "multi_thread": true,
+    "n_bits": 64,
+    "n_classes": 38,
+    "n_epochs": 100,
+    "n_workers": 4,
+    "optimizer": "adam",
+    "relevance_metric": "binary",
+    "save_dir": "./output/resnet50_frozen_normalize/flickr/64/binary",
+    "seed": 42,
+    "tau": 0.005,
+    "topk": null,
+    "wd": 0.0001
+}

@@ -1,11 +1,9 @@
 import os
 import random
-import ssl
 import subprocess
 import threading
 from copy import deepcopy
 from functools import reduce
-from urllib import request
 
 import math
 import numpy as np
@@ -15,44 +13,23 @@ from loguru import logger
 from torch import optim
 from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR, StepLR, ReduceLROnPlateau
 from tqdm import tqdm
-
-
-def gen_triplets(labels, ref_labels=None):
-    if ref_labels is None:
-        sames = (labels @ labels.T) > 0
-    else:
-        sames = (labels @ ref_labels.T) > 0
-
-    diffs = ~sames
-
-    if ref_labels is None:
-        sames.fill_diagonal_(False)
-
-    anc_idxes, pos_idxes, neg_idxes = torch.where(sames.unsqueeze(2) * diffs.unsqueeze(1))
-    return anc_idxes, pos_idxes, neg_idxes
+# from savemat import Save_mat
 
 
 def calc_accuracy(y_pred, y_true):
     """
-    Compute single or multi-class accuracy based on top-k predictions per sample.
+    Compute multi-label accuracy based on top-k predictions per sample.
 
     Args:
         y_pred (torch.Tensor): Model predictions (logits or probabilities) of shape (batch_size, num_classes).
         y_true (torch.Tensor): Ground truth binary labels of shape (batch_size, num_classes).
-                               All zeroes should be ignored before input.
 
     Returns:
-        tensor: accuracy.
+        tensor: Multi-label accuracy.
     """
     num_labels_per_sample = y_true.sum(dim=1)
-
-    # exclude all zero of y_true
-    mask = num_labels_per_sample != 0
-    num_labels_per_sample = num_labels_per_sample[mask]
-    y_true = y_true[mask]
-    y_pred = y_pred[mask]
-
     sorted_indices = torch.argsort(y_pred, dim=1, descending=True)
+
     y_pred_bin = torch.zeros_like(y_pred)
 
     for i in range(y_pred.size(0)):
@@ -103,18 +80,6 @@ def save_checkpoint(args, best_checkpoint):
 
 
 def load_checkpoint(args):
-    if isinstance(args, str):
-        path = args
-        if path.startswith("https"):
-            ssl._create_default_https_context = ssl._create_unverified_context
-            proxy = request.ProxyHandler({"http": "192.168.0.254:10080", "https": "192.168.0.254:10080"})
-            opener = request.build_opener(proxy)
-            request.install_opener(opener)
-            checkpoint = torch.hub.load_state_dict_from_url(path, map_location="cpu", check_hash=True)
-        else:
-            checkpoint = torch.load(path, map_location="cpu")
-        return checkpoint
-    # args is Namespace
     pkl_list = [x for x in os.listdir(args.save_dir) if x.endswith(".pth")]
     if len(pkl_list) == 0:
         logger.warning(f"no checkpoint found")
@@ -122,6 +87,24 @@ def load_checkpoint(args):
     pkl_list.sort(key=lambda x: int(x.split("_")[0].replace("e", "")), reverse=True)
     check_point = torch.load(args.save_dir + "/" + pkl_list[0])
     return check_point
+
+
+def load_selected_states(model, state_dict, startswith_filter=None, verbose=True):
+    if startswith_filter is None:
+        new_checkpoint = state_dict
+    else:
+        new_checkpoint = {}
+        for k, v in state_dict.items():
+            if any(k.startswith(prefix) for prefix in startswith_filter):
+                new_checkpoint[k] = v
+
+    missing, unexpected = model.load_state_dict(new_checkpoint, strict=False)
+    if unexpected:
+        raise RuntimeError("Unexpected state dict keys: {}.".format(unexpected))
+    if verbose:
+        print(missing if missing else "<All keys matched successfully>")
+
+    return model
 
 
 def validate_clear():
@@ -180,6 +163,13 @@ def validate(args, query_loader, dbase_loader, early_stopping, epoch, **kwargs):
     rB, rL = predict(kwargs["model"], dbase_loader, out_idx=out_idx, verbose=verbose)
     map_v = map_fnc(qB, rB, qL, rL, args.topk)
     map_k = "" if args.topk is None else f"@{args.topk}"
+    # Save_mat(epoch=epoch, output_dim=128, datasets="coco",
+    #          query_img=qB,
+    #          retrieval_img=rB,
+    #          query_labels=qL,
+    #          retrieval_labels=rL,
+    #          save_dir='.',
+    #          mode_name="Soft_Label", map=map_v)
 
     del qB, rB, qL, rL
     torch.cuda.empty_cache()
@@ -197,6 +187,7 @@ class EarlyStopping:
         self.patience = patience
         self.best_epoch = best_epoch
         self.best_map = best_map
+
         self.best_checkpoint = None
         self.early_stop = False
         self.counter = 0
@@ -232,59 +223,51 @@ class EarlyStopping:
 def print_in_md(rst):
     """
     print training result in Markdown format, like below:
-    | K\D |  cifar   |  flickr  | nuswide  | coco->nus17 |
-    |----:|:--------:|:--------:|:--------:|:-----------:|
-    |  16 |    -     | 0.222@19 | 0.333@29 |  0.444@39   |
-    | 128 | 0.111@09 |    -     | 0.333@19 |  0.444@29   |
+    | K\D |  cifar   |  flickr  | nuswide  |   coco   |
+    |----:|:--------:|:--------:|:--------:|:--------:|
+    |  16 |    -     | 0.222@09 | 0.333@99 | 0.444@99 |
+    |  32 | 0.111@99 | 0.222@99 | 0.333@09 |    -     |
+    |  64 | 0.111@99 | 0.222@99 | 0.333@99 | 0.444@99 |
+    | 128 |    -     |    -     | 0.333@99 | 0.444@99 |
     """
     if len(rst) == 0:
         return
-
     # datasets = sorted(set([x["dataset"] for x in rst]), key=lambda x: get_class_num(x))
     datasets = sorted(
         set([x["dataset"] for x in rst]),
-        key=lambda x: {"cifar": 1, "flickr": 2, "nuswide": 3, "coco": 4}.get(x, 9),
+        key=lambda x: {"cifar": 1, "flickr": 2, "nuswide": 3, "coco": 4, "veri": 5, "vehicleid": 6}.get(x, 9),
     )
     hash_bits = sorted(set([x["hash_bit"] for x in rst]))
+    best_epochs = sorted(set([x["best_epoch"] for x in rst]))
 
-    try:
-        max_be_len = max(len(str(x["best_epoch"])) for x in rst)
-    except KeyError:
-        max_be_len = None
+    max_len_e = len(str(best_epochs[-1]))
+    max_len_k = max(len(str(hash_bits[-1])), 3)  # len("K\D") -> 3
 
-    temp_dict, max_bm_len = {}, 0
-    for x in rst:
-        prefix = x["best_map"] if isinstance(x["best_map"], str) else f"{x['best_map']:.3f}"
-        suffix = "" if max_be_len is None else f"@{str(x['best_epoch']).zfill(max_be_len)}"
-        temp_dict[(x["dataset"], x["hash_bit"])] = prefix + suffix
-        max_bm_len = max(max_bm_len, len(prefix + suffix))
+    head = f"| {'K'+chr(92)+'D':^{max_len_k}} |"
+    sept = f"|{':':->{max_len_k+2}}|"
 
-    other_col_width = {x: max(len(x), max_bm_len) for x in datasets}
-
-    first_col_width = max(len(str(hash_bits[-1])), 3)  # len("K\D") -> 3
-
-    header = f"| {'K' + chr(92) + 'D':^{first_col_width}} |"
-    septor = f"|{':':->{first_col_width + 2}}|"
-
-    for d in datasets:
-        header += f"{d:^{other_col_width[d] + 2}}|"
-        septor += f":{'-':-^{other_col_width[d]}}:|"
+    for dataset in datasets:
+        head += f"{dataset:^{max_len_e+8}}|"  # len(" 0.xxx@ ") -> 8
+        sept += f":{'-':-^{max_len_e+6}}:|"
 
     rows = []
-    for h in hash_bits:
-        row = f"| {h:>{first_col_width}} |"
-        for d in datasets:
-            ret = temp_dict.get((d, h), "-")
-            row += f"{ret:^{other_col_width[d] + 2}}|"
-        rows.append(row)
+    for hash_bit in hash_bits:
+        temp_str = f"| {hash_bit:>{max_len_k}} |"
+        for dataset in datasets:
+            ret = [x for x in rst if x["dataset"] == dataset and x["hash_bit"] == hash_bit]
+            if len(ret) == 1:
+                temp_str += f" {ret[0]['best_map']:.3f}@{ret[0]['best_epoch']:0>{max_len_e}} |"
+            else:
+                temp_str += f"{'-':^{max_len_e+8}}|"
+        rows.append(temp_str)
 
-    print(header)
-    print(septor)
+    print(head)
+    print(sept)
     for row in rows:
         print(row)
 
 
-def gen_test_data(B, C, K, is_multi_hot=False, normalize_embeddings=True, requires_grad=True, device="cpu"):
+def gen_test_data(B, C, K, is_multi_hot=False, normalize_embeddings=True, device="cpu"):
     """
     Args:
         B: batch size
@@ -298,7 +281,7 @@ def gen_test_data(B, C, K, is_multi_hot=False, normalize_embeddings=True, requir
         singles: [B, ],  categorical ids, None if is_multi_hot
         onehots: [B, C], onehot encoded categorical ids
     """
-    embeddings = torch.randn(B, K, requires_grad=requires_grad).to(device)
+    embeddings = torch.randn(B, K, requires_grad=True).to(device)
     if normalize_embeddings:
         embeddings = F.normalize(embeddings, p=2, dim=-1)
     if is_multi_hot:
@@ -414,7 +397,6 @@ def hash_center_type(n_classes, n_bits):
     """
     used in CenterHashing, CSQ, ...
     """
-    # hadamard: n must be a positive integer, and n must be a power of 2
     lg2 = 0 if n_bits < 1 else int(math.log(n_bits, 2))
     if 2**lg2 != n_bits:
         return "random"
@@ -435,7 +417,6 @@ def predict(net, dataloader, out_idx=None, use_sign=True, verbose=True):
     embs, labs = [], []
 
     # for imgs, labs, _ in tqdm(dataloader): # SingleModal
-    # for imgs, txts, labs, _ in tqdm(dataloader): # CrossModal
     for batch in data_iter:
         with torch.no_grad():
             out = net(batch[0].to(device))
@@ -717,6 +698,4 @@ def get_precision_recall_by_Hamming_Radius(database_output, database_labels, que
 
 
 if __name__ == "__main__":
-    msg = get_gpu_info()
-    print(msg[0])
-    print(f"{msg[0]['mem_used']}MiB")
+    pass
